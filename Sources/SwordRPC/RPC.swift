@@ -28,11 +28,27 @@ extension SwordRPC {
     func handleEvent(_ payload: String) {
         var data = decode(payload)
 
+        // Command responses (acks for SET_ACTIVITY, SUBSCRIBE, etc.) carry a
+        // `cmd` field. Successful acks have `evt: null`; error acks have
+        // `evt: "ERROR"`. They must NOT be treated as disconnects, which the
+        // previous implementation did because the guard below failed on the
+        // null `evt`. This caused every successful presence update to be
+        // reported as a disconnection.
+        if data["cmd"] != nil {
+            if let evt = data["evt"] as? String, evt == "ERROR",
+               let errorData = data["data"] as? [String: Any] {
+                let code = errorData["code"] as? Int ?? 0
+                let message = errorData["message"] as? String ?? ""
+                delegate?.rpcDidReceiveError(self, code: code, message: message)
+            }
+            // Successful command ack: nothing to dispatch.
+            return
+        }
+
         guard let evt = data["evt"] as? String,
               let event = EventType(rawValue: evt)
         else {
-            // We'll treat this as a close.
-            // ...hopefully.
+            // Empty payload from channelInactive, or close frame from Discord.
             delegate?.rpcDidDisconnect(self, code: data["code"] as? Int, message: data["message"] as? String)
             return
         }
