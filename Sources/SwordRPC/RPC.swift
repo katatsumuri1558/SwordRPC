@@ -26,66 +26,56 @@ extension SwordRPC {
     /// Handles incoming events from Discord.
     /// - Parameter payload: JSON given over IPC.
     func handleEvent(_ payload: String) {
-        var data = decode(payload)
+        let data = decode(payload)
 
-        // Command responses (acks for SET_ACTIVITY, SUBSCRIBE, etc.) carry a
-        // `cmd` field. Successful acks have `evt: null`; error acks have
-        // `evt: "ERROR"`. They must NOT be treated as disconnects, which the
-        // previous implementation did because the guard below failed on the
-        // null `evt`. This caused every successful presence update to be
-        // reported as a disconnection.
-        if data["cmd"] != nil {
-            if let evt = data["evt"] as? String, evt == "ERROR",
-               let errorData = data["data"] as? [String: Any] {
-                let code = errorData["code"] as? Int ?? 0
-                let message = errorData["message"] as? String ?? ""
+        // Known event types (READY, ERROR, ACTIVITY_*) come with `evt` set
+        // to the event name. They may also have `cmd: "DISPATCH"`.
+        if let evt = data["evt"] as? String, let event = EventType(rawValue: evt) {
+            let eventData = (data["data"] as? [String: Any]) ?? [:]
+
+            switch event {
+            case .error:
+                let code = eventData["code"] as? Int ?? 0
+                let message = eventData["message"] as? String ?? ""
                 delegate?.rpcDidReceiveError(self, code: code, message: message)
+
+            case .join:
+                if let secret = eventData["secret"] as? String {
+                    delegate?.rpcDidJoinGame(self, secret: secret)
+                }
+
+            case .joinRequest:
+                guard let user = eventData["user"] as? [String: String],
+                      let secret = eventData["secret"] as? String else { return }
+                let joinRequest = PartialUser(
+                    avatar: user["avatar"] ?? "",
+                    discriminator: user["discriminator"] ?? "",
+                    userId: user["id"] ?? "",
+                    username: user["username"] ?? ""
+                )
+                delegate?.rpcDidReceiveJoinRequest(self, user: joinRequest, secret: secret)
+
+            case .ready:
+                delegate?.rpcDidConnect(self)
+                startPresenceUpdater()
+
+            case .spectate:
+                if let secret = eventData["secret"] as? String {
+                    delegate?.rpcDidSpectateGame(self, secret: secret)
+                }
             }
-            // Successful command ack: nothing to dispatch.
             return
         }
 
-        guard let evt = data["evt"] as? String,
-              let event = EventType(rawValue: evt)
-        else {
-            // Empty payload from channelInactive, or close frame from Discord.
-            delegate?.rpcDidDisconnect(self, code: data["code"] as? Int, message: data["message"] as? String)
+        // Successful command ack (e.g. SET_ACTIVITY response): `cmd` is set
+        // and `evt` is null/missing. The previous implementation treated
+        // these as disconnects, breaking presence updates entirely.
+        if data["cmd"] != nil {
             return
         }
 
-        data = data["data"] as! [String: Any]
-
-        switch event {
-        case .error:
-            let code = data["code"] as! Int
-            let message = data["message"] as! String
-            delegate?.rpcDidReceiveError(self, code: code, message: message)
-
-        case .join:
-            let secret = data["secret"] as! String
-            delegate?.rpcDidJoinGame(self, secret: secret)
-
-        case .joinRequest:
-            let user = data["user"] as! [String: String]
-
-            // TODO: can we properly decode this without doing this manually?
-            let joinRequest = PartialUser(
-                avatar: user["avatar"]!,
-                discriminator: user["discriminator"]!,
-                userId: user["id"]!,
-                username: user["username"]!
-            )
-
-            let secret = data["secret"] as! String
-            delegate?.rpcDidReceiveJoinRequest(self, user: joinRequest, secret: secret)
-
-        case .ready:
-            delegate?.rpcDidConnect(self)
-            startPresenceUpdater()
-
-        case .spectate:
-            let secret = data["secret"] as! String
-            delegate?.rpcDidSpectateGame(self, secret: secret)
-        }
+        // Otherwise: empty payload from channelInactive, or a close frame
+        // from Discord carrying `code`/`message`.
+        delegate?.rpcDidDisconnect(self, code: data["code"] as? Int, message: data["message"] as? String)
     }
 }
